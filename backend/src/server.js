@@ -8,6 +8,7 @@ const connectDB = require("./config/db");
 
 const { notFound, errorHandler } = require("./middleware/errorHandler");
 const healthRouter = require("./routes/health");
+const authRouter = require("./routes/auth")
 
 const app = express();
 
@@ -40,6 +41,7 @@ if (!env.isProd) {
 
 // Routes
 app.use("/api/health", healthRouter);
+app.use("/api/auth", authRouter)
 
 // Error handling
 app.use(notFound);

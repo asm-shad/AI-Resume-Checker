@@ -8,12 +8,17 @@ const ApiError = require("../utils/ApiError");
 const { requireAuth } = require("../middleware/auth");
 const { validate } = require("../middleware/validate");
 const { uploadPdf } = require("../middleware/upload");
+const { analyzeLimiter } = require("../middleware/rateLimit");
 
 const Resume = require("../models/Resume");
 const ResumeVersion = require("../models/ResumeVersion");
+const Analysis = require("../models/Analysis");
 
 const { extractText } = require("../services/pdfService");
-const { parseResume: parseStructured } = require("../services/structuredParser");
+const {
+  parseResume: parseStructured,
+} = require("../services/structuredParser");
+const { analyzeResume } = require("../services/geminiService");
 
 const router = express.Router();
 
@@ -38,6 +43,14 @@ const objectIdSchema = z
 
 const idParam = z.object({
   id: objectIdSchema,
+});
+
+const analyzeBody = z.object({
+  versionId: objectIdSchema.optional(),
+  targetRole: z
+    .string()
+    .trim()
+    .optional(),
 });
 
 // ============================================================
@@ -77,10 +90,11 @@ async function loadVersion(resumeId, versionId) {
 router.post(
   "/",
   uploadPdf("file"),
-
   asyncHandler(async (req, res) => {
     // Extract text from uploaded PDF
-    const { text, meta } = await extractText(req.file.buffer);
+    const { text, meta } = await extractText(
+      req.file.buffer,
+    );
 
     // Parse extracted text into structured resume data
     const parsedSections = await parseStructured(text);
@@ -128,7 +142,6 @@ router.post(
 
 router.get(
   "/",
-
   asyncHandler(async (req, res) => {
     const resumes = await Resume.find({
       userId: req.user._id,
@@ -148,9 +161,7 @@ router.get(
 
 router.get(
   "/:id",
-
   validate(idParam, "params"),
-
   asyncHandler(async (req, res) => {
     const resume = await loadOwnedResume(req);
 
@@ -174,7 +185,6 @@ router.get(
 
 router.get(
   "/:id/versions/:versionId",
-
   validate(
     z.object({
       id: objectIdSchema,
@@ -182,7 +192,6 @@ router.get(
     }),
     "params",
   ),
-
   asyncHandler(async (req, res) => {
     const resume = await loadOwnedResume(req);
 
@@ -203,9 +212,7 @@ router.get(
 
 router.delete(
   "/:id",
-
   validate(idParam, "params"),
-
   asyncHandler(async (req, res) => {
     const resume = await loadOwnedResume(req);
 
@@ -214,11 +221,148 @@ router.delete(
       resumeId: resume._id,
     });
 
+    // Delete all analyses belonging to the resume
+    await Analysis.deleteMany({
+      resumeId: resume._id,
+    });
+
     // Delete the resume itself
     await resume.deleteOne();
 
     res.json({
       ok: true,
+    });
+  }),
+);
+
+// ============================================================
+// Analyze Resume
+// ============================================================
+
+router.post(
+  "/:id/analyze",
+  analyzeLimiter,
+  validate(analyzeBody),
+  validate(idParam, "params"),
+  asyncHandler(async (req, res) => {
+    const resume = await loadOwnedResume(req);
+
+    const versionId =
+      req.body.versionId || resume.currentVersionId;
+
+    if (!versionId) {
+      throw ApiError.badRequest(
+        "No version to analyze",
+      );
+    }
+
+    const version = await loadVersion(
+      resume._id,
+      versionId,
+    );
+
+    const {
+      analysis,
+      model,
+      promptTokens,
+      responseTokens,
+    } = await analyzeResume({
+      rawText: version.rawText,
+      targetRole: req.body.targetRole,
+    });
+
+    // Save analysis result
+    const saved = await Analysis.create({
+      userId: req.user._id,
+      resumeId: resume._id,
+      versionId: version._id,
+
+      atsScore: analysis.atsScore,
+
+      scoreBreakdown: analysis.scoreBreakdown,
+
+      issues: analysis.issues,
+
+      strengths: analysis.strengths,
+
+      bulletRewrites: analysis.bulletRewrites,
+
+      keywordsPresent: analysis.keywordsPresent,
+
+      keywordsMissing: analysis.keywordsMissing,
+
+      summary: analysis.summary,
+
+      model,
+
+      promptTokens,
+
+      responseTokens,
+    });
+
+    // Link latest analysis to the version
+    version.latestAnalysisId = saved._id;
+
+    await version.save();
+
+    res.status(201).json({
+      analysis: saved,
+    });
+  }),
+);
+
+// ============================================================
+// Get All Analyses For A Resume
+// ============================================================
+
+router.get(
+  "/:id/analyses",
+  validate(idParam, "params"),
+  asyncHandler(async (req, res) => {
+    const resume = await loadOwnedResume(req);
+
+    const analyses = await Analysis.find({
+      resumeId: resume._id,
+    })
+      .sort({ createdAt: -1 })
+      .lean();
+
+    res.json({
+      analyses,
+    });
+  }),
+);
+
+// ============================================================
+// Get Latest Analysis For A Specific Version
+// ============================================================
+
+router.get(
+  "/:id/versions/:versionId/analysis",
+  validate(
+    z.object({
+      id: objectIdSchema,
+      versionId: objectIdSchema,
+    }),
+    "params",
+  ),
+  asyncHandler(async (req, res) => {
+    const resume = await loadOwnedResume(req);
+
+    const version = await loadVersion(
+      resume._id,
+      req.params.versionId,
+    );
+
+    const analysis = await Analysis.findOne({
+      resumeId: resume._id,
+      versionId: version._id,
+    })
+      .sort({ createdAt: -1 })
+      .lean();
+
+    res.json({
+      analysis: analysis || null,
     });
   }),
 );

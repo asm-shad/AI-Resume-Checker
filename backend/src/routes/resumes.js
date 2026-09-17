@@ -14,6 +14,8 @@ const Resume = require("../models/Resume");
 const ResumeVersion = require("../models/ResumeVersion");
 const Analysis = require("../models/Analysis");
 
+const { diffText, summarize } = require("../services/diffService");
+
 const { extractText } = require("../services/pdfService");
 const {
   parseResume: parseStructured,
@@ -367,8 +369,229 @@ router.get(
   }),
 );
 
+const rewriteBody = z.object({
+  analysisId: objectIdSchema,
+
+  // Omit or leave empty to apply all rewrites
+  rewriteIds: z.array(objectIdSchema).optional(),
+
+  label: z.string().trim().max(40).optional(),
+});
+
 // ============================================================
-// Export Router
+// Apply Rewrites to Raw Text
 // ============================================================
+
+function applyRewritesToText(rawText, rewrites) {
+  let result = rawText;
+
+  for (const r of rewrites) {
+    if (!r?.original || !r?.rewritten) {
+      continue;
+    }
+
+    const idx = result.indexOf(r.original);
+
+    if (idx >= 0) {
+      result =
+        result.slice(0, idx) +
+        r.rewritten +
+        result.slice(idx + r.original.length);
+    } else {
+      // Fallback: append the rewrite as a strengthened alternative
+      result += `\n${r.rewritten}`;
+    }
+  }
+
+  return result;
+}
+
+// ============================================================
+// Patch Structured Resume Sections
+// ============================================================
+
+function patchBulletsInSections(sections, rewrites) {
+  if (!sections) {
+    return null;
+  }
+
+  const cloned = JSON.parse(JSON.stringify(sections));
+
+  for (const r of rewrites) {
+    if (!r?.original || !r?.rewritten) {
+      continue;
+    }
+
+    for (const exp of cloned.experience || []) {
+      if (!Array.isArray(exp.bullets)) {
+        continue;
+      }
+
+      exp.bullets = exp.bullets.map((b) =>
+        b === r.original ? r.rewritten : b,
+      );
+    }
+  }
+
+  return cloned;
+}
+
+// ============================================================
+// Check Whether Parsed Sections Are Empty
+// ============================================================
+
+function looksEmpty(sections) {
+  if (!sections) {
+    return true;
+  }
+
+  const basics = sections.basics || {};
+
+  const hasIdentity =
+    basics.name ||
+    basics.email ||
+    basics.title;
+
+  const hasBody =
+    sections.summary ||
+    sections.experience?.length ||
+    sections.education?.length ||
+    sections.skills?.length;
+
+  return !hasIdentity && !hasBody;
+}
+
+// ============================================================
+// Rewrite Resume
+// ============================================================
+
+router.post(
+  "/:id/rewrite",
+  validate(idParam, "params"),
+  validate(rewriteBody),
+  asyncHandler(async (req, res) => {
+    const resume = await loadOwnedResume(req);
+
+    const analysis = await Analysis.findOne({
+      _id: req.body.analysisId,
+      resumeId: resume._id,
+    });
+
+    if (!analysis) {
+      throw ApiError.notFound("Analysis not found");
+    }
+
+    const baseVersion = await loadVersion(
+      resume._id,
+      analysis.versionId,
+    );
+
+    const selected = req.body.rewriteIds?.length
+      ? analysis.bulletRewrites.filter((r) =>
+          req.body.rewriteIds.includes(r._id.toString()),
+        )
+      : analysis.bulletRewrites;
+
+    if (!selected.length) {
+      throw ApiError.badRequest(
+        "No rewrites selected to apply",
+      );
+    }
+
+    const newRaw = applyRewritesToText(
+      baseVersion.rawText,
+      selected,
+    );
+
+    // Safety net: create a structured copy from the base
+    // version with the selected bullets already replaced.
+    // This prevents V2 from having empty sections if
+    // Gemini's re-parse fails.
+    const patchedFromBase = patchBulletsInSections(
+      baseVersion.parsedSections,
+      selected,
+    );
+
+    const reparsed = await parseStructured(newRaw);
+
+    const finalParsed = looksEmpty(reparsed)
+      ? patchedFromBase
+      : reparsed;
+
+    const nextNumber =
+      resume.latestVersionNumber + 1;
+
+    const newVersion = await ResumeVersion.create({
+      resumeId: resume._id,
+      versionNumber: nextNumber,
+      label:
+        req.body.label?.trim() ||
+        `V${nextNumber}`,
+      rawText: newRaw,
+      parsedSections: finalParsed,
+      sourceType: "rewrite",
+      parentVersionId: baseVersion._id,
+    });
+
+    resume.latestVersionNumber = nextNumber;
+    resume.currentVersionId = newVersion._id;
+
+    await resume.save();
+
+    res.status(201).json({
+      version: newVersion,
+      appliedCount: selected.length,
+    });
+  }),
+);
+
+const diffQuery = z.object({
+  from: objectIdSchema,
+  to: objectIdSchema,
+  mode: z.enum(["words", "lines"]).optional(),
+});
+
+// ============================================================
+// Compare Two Resume Versions
+// ============================================================
+
+router.get(
+  "/:id/diff",
+  validate(idParam, "params"),
+  validate(diffQuery, "query"),
+  asyncHandler(async (req, res) => {
+    const resume = await loadOwnedResume(req);
+
+    const [fromV, toV] = await Promise.all([
+      loadVersion(resume._id, req.query.from),
+      loadVersion(resume._id, req.query.to),
+    ]);
+
+    const parts = diffText(
+      fromV.rawText,
+      toV.rawText,
+      req.query.mode,
+    );
+
+    res.json({
+      from: {
+        id: fromV._id,
+        label: fromV.label,
+        versionNumber: fromV.versionNumber,
+      },
+
+      to: {
+        id: toV._id,
+        label: toV.label,
+        versionNumber: toV.versionNumber,
+      },
+
+      parts,
+
+      stats: summarize(parts),
+    });
+  }),
+);
+
 
 module.exports = router;

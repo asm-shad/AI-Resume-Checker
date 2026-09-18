@@ -7,29 +7,36 @@ const env = require("./config/env");
 const connectDB = require("./config/db");
 
 const { notFound, errorHandler } = require("./middleware/errorHandler");
-const healthRouter = require("./routes/health");
-const authRouter = require("./routes/auth")
-const resumesRouter = require("./routes/resumes")
 
-const dashboardRouter = require("./routes/dashboard")
-const insightsRouter = require("./routes/insights")
-const versionsRouter = require("./routes/versions")
-const historyRouter = require("./routes/history")
+const healthRouter = require("./routes/health");
+const authRouter = require("./routes/auth");
+const resumesRouter = require("./routes/resumes");
+const dashboardRouter = require("./routes/dashboard");
+const insightsRouter = require("./routes/insights");
+const versionsRouter = require("./routes/versions");
+const historyRouter = require("./routes/history");
 
 const app = express();
 
 app.set("trust proxy", 1);
 
+// --------------------------------------------------
 // CORS
+// --------------------------------------------------
+
 app.use(
   cors({
-    origin: true, // Reflect request origin
+    origin: true,
     credentials: true,
   })
 );
 
+// --------------------------------------------------
 // Body parsers
+// --------------------------------------------------
+
 app.use(express.json({ limit: "1mb" }));
+
 app.use(
   express.urlencoded({
     extended: true,
@@ -37,46 +44,95 @@ app.use(
   })
 );
 
+// --------------------------------------------------
 // Cookies
+// --------------------------------------------------
+
 app.use(cookieParser());
 
+// --------------------------------------------------
 // Logging
+// --------------------------------------------------
+
 if (!env.isProd) {
   app.use(morgan("dev"));
 }
 
-// Routes
-app.use("/api/health", healthRouter);
-app.use("/api/auth", authRouter)
-app.use("/api/resumes", resumesRouter)
-app.use("/api/dashboard", dashboardRouter)
-app.use("/api/insights", insightsRouter)
-app.use("/api/versions", versionsRouter)
-app.use("/api/history", historyRouter)
+// --------------------------------------------------
+// Root route
+// --------------------------------------------------
 
+app.get("/", (req, res) => {
+  res.status(200).json({
+    success: true,
+    message: "AI Resume Checker API is running",
+  });
+});
+
+// --------------------------------------------------
+// Routes
+// --------------------------------------------------
+
+app.use("/api/health", healthRouter);
+app.use("/api/auth", authRouter);
+app.use("/api/resumes", resumesRouter);
+app.use("/api/dashboard", dashboardRouter);
+app.use("/api/insights", insightsRouter);
+app.use("/api/versions", versionsRouter);
+app.use("/api/history", historyRouter);
+
+// --------------------------------------------------
 // Error handling
+// --------------------------------------------------
+
 app.use(notFound);
 app.use(errorHandler);
 
-async function start() {
-  try {
-    await connectDB();
+// --------------------------------------------------
+// Database connection
+// --------------------------------------------------
 
-    app.listen(env.port, () => {
-      console.log(
-        `Server listening on http://localhost:${env.port} (${env.nodeEnv})`
-      );
-    });
-  } catch (err) {
-    console.error("Failed to start server:", err.message);
-    process.exit(1);
+let dbConnectionPromise;
+
+async function ensureDatabaseConnection() {
+  if (!dbConnectionPromise) {
+    dbConnectionPromise = connectDB();
   }
+
+  return dbConnectionPromise;
 }
 
-process.on("unhandledRejection", (reason) => {
-    console.error("Unhandled rejection:", reason);
-})
+// --------------------------------------------------
+// Vercel / Serverless entry
+// --------------------------------------------------
 
-start();
+if (env.nodeEnv !== "production") {
+  ensureDatabaseConnection()
+    .then(() => {
+      app.listen(env.port, () => {
+        console.log(
+          `Server listening on http://localhost:${env.port} (${env.nodeEnv})`
+        );
+      });
+    })
+    .catch((err) => {
+      console.error("Failed to start server:", err.message);
+      process.exit(1);
+    });
+}
 
-module.exports = app;
+// Export Express app for Vercel
+module.exports = async (req, res) => {
+  try {
+    await ensureDatabaseConnection();
+    return app(req, res);
+  } catch (err) {
+    console.error("Server initialization error:", err);
+
+    return res.status(500).json({
+      error: {
+        message: "Server initialization failed",
+      },
+    });
+  }
+};

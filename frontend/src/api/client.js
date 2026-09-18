@@ -7,7 +7,7 @@ export const apiClient = axios.create({
     "Content-Type": "application/json",
   },
 });
-
+// Its Updated 
 apiClient.interceptors.response.use(
   (res) => res,
   (err) => {

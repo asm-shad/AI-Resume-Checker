@@ -103,10 +103,10 @@ async function ensureDatabaseConnection() {
 }
 
 // --------------------------------------------------
-// Vercel / Serverless entry
+// Local development server
 // --------------------------------------------------
 
-if (env.nodeEnv !== "production") {
+if (!process.env.VERCEL) {
   ensureDatabaseConnection()
     .then(() => {
       app.listen(env.port, () => {
@@ -121,7 +121,10 @@ if (env.nodeEnv !== "production") {
     });
 }
 
-// Export Express app for Vercel
+// --------------------------------------------------
+// Vercel / Serverless entry
+// --------------------------------------------------
+
 module.exports = async (req, res) => {
   try {
     await ensureDatabaseConnection();

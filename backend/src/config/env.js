@@ -39,5 +39,7 @@ module.exports = {
 
   geminiModel: process.env.GEMINI_MODEL || "gemini-2.5-flash",
 
-  isProd: process.env.NODE_ENV === "production",
+  isProd:
+    process.env.NODE_ENV === "production" ||
+    process.env.VERCEL === "1",
 };
